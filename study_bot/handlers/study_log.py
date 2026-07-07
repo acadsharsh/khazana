@@ -36,10 +36,10 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
     Determine their intent and return a strictly valid JSON object. Do not include markdown code block syntax.
     
     Intents possible:
-    1. "log": User is sharing what they studied.
+    1. "log": User is sharing what they studied (e.g., "math lec 5,6,7 aur chem lec 4,5").
        Extract an array of sessions. Estimate duration dynamically if only lecture numbers are given (assume ~1.5h per lecture).
        Example output format:
-       {{"intent": "log", "data": [{{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}}]}}
+       {{"intent": "log", "data": [{{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}}, {{"subject": "Chemistry", "hours": 3.0, "note": "Lectures 4,5"}}]}}
 
     2. "set_goal": User wants to set a target/goal for today.
        Example: "aaj ka target 6 hours" -> {{"intent": "set_goal", "hours": 6.0}}
@@ -55,7 +55,7 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
 
     try:
         async with httpx.AsyncClient() as client:
-            # generationConfig added to explicitly enforce JSON output format structure from API level
+            # generationConfig enforces structural validation from the AI studio directly
             response = await client.post(
                 f"{GEMINI_API_URL}?key={api_key}",
                 json={
@@ -69,7 +69,7 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
                 data = response.json()
                 raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
                 
-                # Resilient cleaning layer to strip backticks, wrappers, or leading/trailing noise
+                # Dynamic stripping to clear any stray wrapper artifacts
                 if "```" in raw_json:
                     raw_json = raw_json.replace("```json", "").replace("```", "").strip()
                 
@@ -122,34 +122,50 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
 
                 for entry in sessions_data:
                     sub_name = entry.get("subject", "General").strip()
-                    hours_val = float(entry.get("hours", 0))
+                    
+                    # Prevent casting type exceptions dynamically
+                    try:
+                        hours_val = float(entry.get("hours", 0))
+                    except (ValueError, TypeError):
+                        hours_val = 0.0
+                        
                     note_val = entry.get("note", user_text)
 
                     if hours_val <= 0 or len(sub_name) <= 1:
                         continue
 
-                    # Core DB operations
-                    result = await study_service.log_study(
-                        session, db_user, sub_name, hours_val, note_val
-                    )
-                    logged_any = True
-                    master_confirmation_lines.append(
-                        f"✨ Logged <b>{human_hours(hours_val)}</b> in <b>{escape_html(sub_name)}</b> (+{result.xp_earned} XP)"
-                    )
+                    # Core DB operations wrapper
+                    try:
+                        result = await study_service.log_study(
+                            session, db_user, sub_name, hours_val, note_val
+                        )
+                        logged_any = True
+                        master_confirmation_lines.append(
+                            f"✨ Logged <b>{human_hours(hours_val)}</b> in <b>{escape_html(sub_name)}</b> (+{result.xp_earned} XP)"
+                        )
+                    except Exception as db_err:
+                        logger.error(f"Failed to save log to DB for {sub_name}: {db_err}")
+                        await reply_html(update, f"⚠️ DB Save Error ({escape_html(sub_name)}): {escape_html(str(db_err))}")
+                        return
 
                 if not logged_any:
-                    await reply_html(update, "❌ Kuch valid data log nahi ho paaya.")
+                    await reply_html(update, "❌ AI ne text padha par koi valid hours extract nahi ho paaye.")
                     return
 
-                new_badges = await gamification_service.evaluate_user(session, db_user)
-                await reminder_service.mark_logged(session, db_user.telegram_id)
-                
-                streak = db_user.current_streak
-                
-                # Reusing structured session scope seamlessly
-                progress_obj = await goal_service.progress_for(session, db_user.telegram_id)
-                progress = _format_goal_progress(progress_obj)
-                leaderboard_service.clear_cache()
+                # Safely run hooks without halting the thread context
+                try:
+                    new_badges = await gamification_service.evaluate_user(session, db_user)
+                    await reminder_service.mark_logged(session, db_user.telegram_id)
+                    streak = db_user.current_streak
+                    
+                    progress_obj = await goal_service.progress_for(session, db_user.telegram_id)
+                    progress = _format_goal_progress(progress_obj)
+                    leaderboard_service.clear_cache()
+                except Exception as post_err:
+                    logger.error(f"Post-log processing crash: {post_err}")
+                    progress = "Target progress calculation suspended."
+                    streak = getattr(db_user, 'current_streak', 0)
+                    new_badges = []
 
                 summary_txt = "🧠 <b>Gemini AI Auto-Tracker</b>\n" + "\n".join(master_confirmation_lines)
                 if new_badges:
@@ -160,7 +176,11 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
 
             # --- INTENT: SET DAILY GOAL ---
             elif intent == "set_goal":
-                hours_val = float(ai_analysis.get("hours", 0))
+                try:
+                    hours_val = float(ai_analysis.get("hours", 0))
+                except (ValueError, TypeError):
+                    hours_val = 0.0
+
                 if hours_val <= 0 or hours_val > 24:
                     await reply_html(update, "❌ Sahi ghante batao bhai (1 se 24 ke beech)!")
                     return
@@ -174,12 +194,13 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
             elif intent == "check_progress":
                 progress_obj = await goal_service.progress_for(session, user.id)
                 text_bar = _format_goal_progress(progress_obj)
-                status = "✅ Goal reached!" if progress_obj.completed and progress_obj.goal_hours > 0 else ""
+                status = "✅ Goal reached!" if progress_obj and getattr(progress_obj, 'completed', False) and progress_obj.goal_hours > 0 else ""
                 await reply_html(update, f"📊 Today's progress\n{text_bar}\n{status}")
 
-    except Exception:
+    except Exception as e:
         logger.exception("Error inside global AI engine execution")
-        await reply_html(update, "⚠️ Kuch gadbad ho gayi background mein, thodi der baad try karo.")
+        # Direct debugging report right in the active layout
+        await reply_html(update, f"⚠️ Runtime Error: <code>{escape_html(str(e))}</code>\nCheck Render logs for traceback.")
 
 
 def _format_goal_progress(progress) -> str:
