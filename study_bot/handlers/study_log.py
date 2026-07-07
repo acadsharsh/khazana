@@ -47,18 +47,20 @@ async def _parse_with_gemini(text: str) -> list[dict]:
         return []
 
     prompt = f"""
-    You are an expert AI data extractor for a student study tracking bot.
-    Analyze the following user's raw input paragraph and extract all study sessions.
+    You are a smart AI assistant for a student study bot.
+    Analyze this raw input: "{text}"
     
-    User Input: "{text}"
-    
-    Convert it into a strictly valid JSON array of objects. Each object MUST have:
-    1. "subject": Cleaned short name of the subject (e.g., "Math", "Physics", "Chemistry", "ITF").
-    2. "hours": The float/integer number of hours spent on that subject. (Convert phrases like "4 hrs 30 mins" to 4.5, "1 hr" to 1.0).
-    3. "note": A concise summary of specific tasks/topics done for that subject from the text (e.g. "Math hw done, lectures 5,6,7").
+    Extract or intelligently estimate the study sessions. 
+    If the user mentions lecture numbers without hours (e.g., "math lec 5,6,7"), do NOT log the lecture number as hours; instead, smart-estimate the duration based on normal lecture lengths (approx 1.5 hours per lecture).
 
-    Return ONLY the raw valid JSON block array. Do not include markdown code block ticks (```json).
-    If no clear study log exists, return an empty array [].
+    Return a strictly valid JSON array of objects. No markdown formatting, no wrapper.
+    Format:
+    [
+      {{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}},
+      {{"subject": "Chem", "hours": 3.0, "note": "Lectures 4,5"}}
+    ]
+    If nothing is trackable, return [].
+    """
     """
 
     try:
