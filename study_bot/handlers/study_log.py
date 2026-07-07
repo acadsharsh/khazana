@@ -104,28 +104,31 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
 
 
 @rate_limited()
+@rate_limited()
 async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_text = update.message.text.strip() if update.message else ""
-    if not user_text:
+    """Intercepts every group message, evaluates intent via Gemini, and updates engine seamlessly."""
+    if not update.message or not update.message.text:
         return
 
+    user_text = update.message.text.strip()
+    user = update.effective_user  # <-- Yeh line yahan hona zaroori hai!
+
     # 1. SMART FILTER: Check if bot was mentioned OR specific keywords are present
-    bot_username = context.bot.username
-    is_mentioned = f"@{bot_username}" in user_text
+    bot_username = context.bot.username if context.bot else ""
+    is_mentioned = (bot_username and f"@{bot_username}" in user_text)
     
-    keywords = ["target", "log", "progress", "padhle", "study", "stats"]
+    # Keyword filter to save API calls
+    keywords = ["target", "log", "progress", "padhle", "study", "stats", "mera", "kitna"]
     has_keyword = any(k in user_text.lower() for k in keywords)
 
-    # Agar mention nahi hai aur koi keyword bhi nahi hai, toh chup raho!
+    # Agar mention nahi hai aur koi keyword bhi nahi hai, toh bot chup rahega!
     if not is_mentioned and not has_keyword:
         return
 
-    # Ab sirf upar wali condition satisfy hone par hi typing show karo
     await update.message.reply_chat_action("typing")
-    
-    # Baaki ka logic waisa hi rahega...
+
+    # Get dynamic intent from Gemini
     ai_analysis = await _analyze_intent_with_gemini(user_text)
-    # ... rest of the code ...
     intent = ai_analysis.get("intent", "chat")
 
     # --- INTENT: NORMAL CHAT/MOTIVATION ---
@@ -136,6 +139,7 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
 
     try:
         async with session_scope() as session:
+            # Ab yahan 'user' variable guaranteed defined hai
             db_user = await user_service.get_or_create_user(
                 session, user.id, user.username, user.full_name
             )
@@ -152,85 +156,55 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
 
                 for entry in sessions_data:
                     sub_name = entry.get("subject", "General").strip()
-                    
-                    # Prevent casting type exceptions dynamically
                     try:
                         hours_val = float(entry.get("hours", 0))
                     except (ValueError, TypeError):
                         hours_val = 0.0
-                        
                     note_val = entry.get("note", user_text)
 
                     if hours_val <= 0 or len(sub_name) <= 1:
                         continue
 
-                    # Core DB operations wrapper
                     try:
-                        result = await study_service.log_study(
-                            session, db_user, sub_name, hours_val, note_val
-                        )
+                        result = await study_service.log_study(session, db_user, sub_name, hours_val, note_val)
                         logged_any = True
                         master_confirmation_lines.append(
                             f"✨ Logged <b>{human_hours(hours_val)}</b> in <b>{escape_html(sub_name)}</b> (+{result.xp_earned} XP)"
                         )
                     except Exception as db_err:
-                        logger.error(f"Failed to save log to DB for {sub_name}: {db_err}")
-                        await reply_html(update, f"⚠️ DB Save Error ({escape_html(sub_name)}): {escape_html(str(db_err))}")
+                        logger.error(f"DB Save Error: {db_err}")
+                        await reply_html(update, f"⚠️ DB Save Error: {str(db_err)}")
                         return
 
-                if not logged_any:
-                    await reply_html(update, "❌ AI ne text padha par koi valid hours extract nahi ho paaye.")
-                    return
-
-                # Safely run hooks without halting the thread context
-                try:
+                if logged_any:
                     new_badges = await gamification_service.evaluate_user(session, db_user)
                     await reminder_service.mark_logged(session, db_user.telegram_id)
-                    streak = db_user.current_streak
-                    
                     progress_obj = await goal_service.progress_for(session, db_user.telegram_id)
                     progress = _format_goal_progress(progress_obj)
-                    leaderboard_service.clear_cache()
-                except Exception as post_err:
-                    logger.error(f"Post-log processing crash: {post_err}")
-                    progress = "Target progress calculation suspended."
-                    streak = getattr(db_user, 'current_streak', 0)
-                    new_badges = []
-
-                summary_txt = "🧠 <b>Gemini AI Auto-Tracker</b>\n" + "\n".join(master_confirmation_lines)
-                if new_badges:
-                    badges = " ".join(f"{b.emoji} <b>{escape_html(b.name)}</b>" for b in new_badges)
-                    summary_txt += f"\n🎖️ Achievements: {badges}"
-                
-                await reply_html(update, f"{summary_txt}\n\n🔥 Streak: {streak} days\n{progress}")
+                    
+                    summary = "🧠 <b>AI Auto-Tracker</b>\n" + "\n".join(master_confirmation_lines)
+                    if new_badges:
+                        badges = " ".join(f"{b.emoji} <b>{escape_html(b.name)}</b>" for b in new_badges)
+                        summary += f"\n🎖️ Achievements: {badges}"
+                    await reply_html(update, f"{summary}\n\n🔥 Streak: {db_user.current_streak} days\n{progress}")
 
             # --- INTENT: SET DAILY GOAL ---
             elif intent == "set_goal":
                 try:
                     hours_val = float(ai_analysis.get("hours", 0))
-                except (ValueError, TypeError):
-                    hours_val = 0.0
-
-                if hours_val <= 0 or hours_val > 24:
-                    await reply_html(update, "❌ Sahi ghante batao bhai (1 se 24 ke beech)!")
-                    return
-                
+                except: hours_val = 0.0
                 await goal_service.set_goal(session, user.id, hours_val)
-                progress_obj = await goal_service.progress_for(session, user.id)
-                progress = _format_goal_progress(progress_obj)
+                progress = _format_goal_progress(await goal_service.progress_for(session, user.id))
                 await reply_html(update, f"🎯 Daily goal set to <b>{human_hours(hours_val)}</b>!\n{progress}")
 
             # --- INTENT: CHECK PROGRESS ---
             elif intent == "check_progress":
                 progress_obj = await goal_service.progress_for(session, user.id)
-                text_bar = _format_goal_progress(progress_obj)
-                status = "✅ Goal reached!" if progress_obj and getattr(progress_obj, 'completed', False) and progress_obj.goal_hours > 0 else ""
-                await reply_html(update, f"📊 Today's progress\n{text_bar}\n{status}")
+                await reply_html(update, f"📊 Today's progress\n{_format_goal_progress(progress_obj)}")
 
     except Exception as e:
-        logger.exception("Error inside global AI engine execution")
-        # Direct debugging report right in the active layout
-        await reply_html(update, f"⚠️ Runtime Error: <code>{escape_html(str(e))}</code>\nCheck Render logs for traceback.")
+        logger.exception("Engine execution crash")
+        await reply_html(update, f"⚠️ Error: {str(e)}")
 
 
 def _format_goal_progress(progress) -> str:
