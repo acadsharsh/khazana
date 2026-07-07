@@ -83,9 +83,6 @@ def _register_handlers(app: Application) -> None:
         ("start", core.cmd_start),
         ("help", core.cmd_help),
         ("menu", core.cmd_menu),
-        ("editlog", study_log.cmd_editlog),  # Yeh rehna chahiye
-        ("undo", study_log.cmd_undo),        # Yeh bhi rehna chahiye
-        # "log", "goal", "progress" WALI LINES KO HATA DIYA HAI
         ("streak", gamification.cmd_streak),
         ("leaderboard", gamification.cmd_leaderboard),
         ("rank", gamification.cmd_rank),
