@@ -105,16 +105,27 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
 
 @rate_limited()
 async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Intercepts every group message, evaluates intent via Gemini, and updates engine seamlessly."""
-    user_text = update.message.text.strip() if update.message else None
+    user_text = update.message.text.strip() if update.message else ""
     if not user_text:
         return
 
-    user = update.effective_user
-    await update.message.reply_chat_action("typing")
+    # 1. SMART FILTER: Check if bot was mentioned OR specific keywords are present
+    bot_username = context.bot.username
+    is_mentioned = f"@{bot_username}" in user_text
+    
+    keywords = ["target", "log", "progress", "padhle", "study", "stats"]
+    has_keyword = any(k in user_text.lower() for k in keywords)
 
-    # Get dynamic intent from Gemini
+    # Agar mention nahi hai aur koi keyword bhi nahi hai, toh chup raho!
+    if not is_mentioned and not has_keyword:
+        return
+
+    # Ab sirf upar wali condition satisfy hone par hi typing show karo
+    await update.message.reply_chat_action("typing")
+    
+    # Baaki ka logic waisa hi rahega...
     ai_analysis = await _analyze_intent_with_gemini(user_text)
+    # ... rest of the code ...
     intent = ai_analysis.get("intent", "chat")
 
     # --- INTENT: NORMAL CHAT/MOTIVATION ---
