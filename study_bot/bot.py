@@ -11,6 +11,7 @@ import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
+
 from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
@@ -32,9 +33,6 @@ logger = logging.getLogger(__name__)
 COMMAND_DESCRIPTIONS = {
     "start": "Register & show the menu",
     "help": "List every command",
-    "log": "Log study time: /log Math 2",
-    "goal": "Set today's goal: /goal 5",
-    "progress": "Today's goal progress",
     "stats": "Your full statistics",
     "streak": "Current & longest streak",
     "leaderboard": "Rankings (daily/weekly/monthly/alltime)",
@@ -85,11 +83,8 @@ def _register_handlers(app: Application) -> None:
         ("start", core.cmd_start),
         ("help", core.cmd_help),
         ("menu", core.cmd_menu),
-        ("log", study_log.cmd_log),
         ("editlog", study_log.cmd_editlog),
         ("undo", study_log.cmd_undo),
-        ("goal", study_log.cmd_goal),
-        ("progress", study_log.cmd_progress),
         ("streak", gamification.cmd_streak),
         ("leaderboard", gamification.cmd_leaderboard),
         ("rank", gamification.cmd_rank),
@@ -116,6 +111,10 @@ def _register_handlers(app: Application) -> None:
     ]
     for name, func in commands:
         app.add_handler(CommandHandler(name, func))
+
+    # --- ZERO-COMMAND AI INTERCEPTOR ---
+    # Yeh handler sabhi non-command text messages ko capture karega aur study_log ke AI router ko dega
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, study_log.handle_global_ai_message))
 
     app.add_handler(CallbackQueryHandler(callbacks.cmd_callback))
     app.add_handler(MessageHandler(filters.COMMAND, core.unknown_command))
