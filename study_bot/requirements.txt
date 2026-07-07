@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# Study Group Accountability Telegram Bot - Python dependencies
+# Tested with Python 3.11+
+# ---------------------------------------------------------------------------
+
+# Telegram bot framework (v21+, fully async)
+python-telegram-bot==21.6
+
+# Async scheduling
+APScheduler>=3.10.4,<3.11.0
+
+# Database (async SQLAlchemy + async sqlite driver)
+SQLAlchemy>=2.0.29,<3.0
+aiosqlite>=0.20.0
+
+# Configuration / environment loading
+python-dotenv>=1.0.1
+
+# Timezone data
+tzdata>=2024.1 ; sys_platform == 'win32'
+
+# Spreadsheet export
+openpyxl>=3.1.2
+
+# ---------------------------------------------------------------------------
+# Development / testing only
+# ---------------------------------------------------------------------------
+pytest>=8.1.1
+pytest-asyncio>=0.23.6

@@ -1,0 +1,34 @@
+# Secrets / config
+.env
+
+# SQLite databases & runtime data
+study_bot/data/*.db
+study_bot/data/*.db-journal
+study_bot/data/*.sqlite*
+study_bot/data/exports/*
+!study_bot/data/.gitkeep
+
+# Log files
+study_bot/logs/*
+!study_bot/logs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

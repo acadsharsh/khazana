@@ -1,0 +1,2 @@
+log_id,telegram_id,username,name,subject,hours,note,date,week_number,month,year,xp_earned,timestamp
+1,1,alice,Alice,Math,2.0,,2026-07-07,28,7,2026,20,2026-07-07T13:03:57.394902
