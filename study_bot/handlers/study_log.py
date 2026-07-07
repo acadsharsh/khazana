@@ -20,11 +20,15 @@ from handlers.core import reply_html
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+# List of endpoints to try in order to avoid 404/API errors
+GEMINI_ENDPOINTS = [
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+]
 
 async def _analyze_intent_with_gemini(text: str) -> dict:
-    """Analyze the user text to find their real intent and structured data with robust error recovery."""
-    # Direct fetch without dynamic getattr risk
+    """Analyze the user text to find their real intent and structured data with robust endpoint recovery."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         try:
@@ -43,10 +47,10 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
     Determine their intent and return a strictly valid JSON object. Do not include markdown code block syntax.
     
     Intents possible:
-    1. "log": User is sharing what they studied.
+    1. "log": User is sharing what they studied (e.g., "math lec 5,6,7 aur chem lec 4,5").
        Extract an array of sessions. Estimate duration dynamically if only lecture numbers are given (assume ~1.5h per lecture).
        Example output format:
-       {{"intent": "log", "data": [{{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}}]}}
+       {{"intent": "log", "data": [{{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}}, {{"subject": "Chemistry", "hours": 3.0, "note": "Lectures 4,5"}}]}}
 
     2. "set_goal": User wants to set a target/goal for today.
        Example: "aaj ka target 6 hours" -> {{"intent": "set_goal", "hours": 6.0}}
@@ -60,36 +64,43 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
     Return ONLY a raw valid JSON object.
     """
 
-    try:
-        # Enforce application/json format string globally
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json"}
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{GEMINI_API_URL}?key={api_key}",
-                json=payload,
-                timeout=15.0
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+
+    last_error_status = None
+    
+    async with httpx.AsyncClient() as client:
+        # Sequentially try each endpoint in case of 404 or other connection/API issues
+        for endpoint in GEMINI_ENDPOINTS:
+            try:
+                logger.info(f"Attempting Gemini API request to: {endpoint}")
+                response = await client.post(
+                    f"{endpoint}?key={api_key}",
+                    json=payload,
+                    timeout=15.0
+                )
                 
-                if "```" in raw_json:
-                    raw_json = raw_json.replace("```json", "").replace("```", "").strip()
+                if response.status_code == 200:
+                    data = response.json()
+                    raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
+                    
+                    if "```" in raw_json:
+                        raw_json = raw_json.replace("```json", "").replace("```", "").strip()
+                    
+                    logger.info(f"Gemini raw clean output response parsed successfully: {raw_json}")
+                    return json.loads(raw_json)
+                else:
+                    last_error_status = response.status_code
+                    logger.warning(f"Endpoint {endpoint} returned status code: {response.status_code}. Trying next fallback...")
+            except Exception as endpoint_err:
+                logger.error(f"Failed connection to endpoint {endpoint}: {endpoint_err}")
+                continue
                 
-                logger.info(f"Gemini raw clean output response parsed: {raw_json}")
-                return json.loads(raw_json)
-            else:
-                logger.error(f"Gemini API returned code: {response.status_code} - {response.text}")
-                return {"intent": "chat", "reply": f"Gemini API Error: Status {response.status_code}"}
-                
-    except Exception as e:
-        logger.error(f"Gemini direct endpoint compilation failed: {e}")
-        return {"intent": "chat", "reply": f"⚠️ Parser Crash: {str(e)}"}
+    # If all endpoints failed
+    err_msg = f"Gemini API Error: Status {last_error_status}" if last_error_status else "All API endpoints unreachable"
+    return {"intent": "chat", "reply": f"⚠️ {err_msg}. Please check your GEMINI_API_KEY value."}
 
 
 @rate_limited()
