@@ -150,32 +150,6 @@ def run_dummy_server():
     server.serve_forever()
 
 
-async def run_bot_async(app: Application) -> None:
-    """Python 3.14+ safe async entry point to handle bot lifecycle."""
-    await app.initialize()
-    await app.start()
-    
-    await app.updater.start_polling(
-        allowed_updates=Update.ALL_TYPES, 
-        stop_signals=None,
-        read_timeout=30,
-        write_timeout=30,
-        connect_timeout=30
-    )
-    logger.info("Bot successfully started and polling for updates...")
-    
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Termination signal received.")
-    finally:
-        logger.info("Stopping bot gracefully...")
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-
-
 def main() -> None:
     """Entry point: configure logging and start long polling."""
     setup_logging(settings.log_level)
@@ -186,20 +160,27 @@ def main() -> None:
         )
         return
     
+    # Render binding ke liye dummy server initiation
     threading.Thread(target=run_dummy_server, daemon=True).start()
     
     app = create_application()
 
+    # Python 3.14+ compatibility ke liye explicitly main thread me standard loop register kar dena
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    try:
-        loop.run_until_complete(run_bot_async(app))
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
+    # Ab run_polling standard tareeke se chalega kyunki peeche event loop activate ho chuka hai
+    logger.info("Invoking secure run_polling sequence...")
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        close_loop=False,  # loop close hone se async tasks destroy hone ka error khatam hoga
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30
+    )
 
 
 if __name__ == "__main__":
