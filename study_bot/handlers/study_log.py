@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 async def _analyze_intent_with_gemini(text: str) -> dict:
-    """Analyze the user text to find their real intent and structured data."""
+    """Analyze the user text to find their real intent and structured data with robust error recovery."""
     api_key = getattr(settings, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         logger.warning("GEMINI_API_KEY missing!")
@@ -33,7 +33,7 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
     You are the brain of a student group tracking bot named "padhle bsdk".
     Analyze this message from a student: "{text}"
 
-    Determine their intent and return a strictly valid JSON object.
+    Determine their intent and return a strictly valid JSON object. Do not include markdown code block syntax.
     
     Intents possible:
     1. "log": User is sharing what they studied.
@@ -50,24 +50,37 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
     4. "chat": Normal chat, rant, or motivation. Do not touch DB. Just provide a short, witty, highly encouraging Hinglish reply keeping the JEE/Class 12 context and group vibe ("padhle bsdk") alive.
        Example: {{"intent": "chat", "reply": "Padhle bhai, ncert lagane ka time aa gaya hai!"}}
 
-    Return ONLY raw valid JSON block. No markdown, no wrappers.
+    Return ONLY a raw valid JSON object.
     """
 
     try:
         async with httpx.AsyncClient() as client:
+            # generationConfig added to explicitly enforce JSON output format structure from API level
             response = await client.post(
                 f"{GEMINI_API_URL}?key={api_key}",
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-                timeout=10.0
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"responseMimeType": "application/json"}
+                },
+                timeout=12.0
             )
+            
             if response.status_code == 200:
                 data = response.json()
                 raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                if raw_json.startswith("```"):
-                    raw_json = raw_json.split("```")[1].replace("json", "").strip()
+                
+                # Resilient cleaning layer to strip backticks, wrappers, or leading/trailing noise
+                if "```" in raw_json:
+                    raw_json = raw_json.replace("```json", "").replace("```", "").strip()
+                
+                logger.info(f"Gemini raw clean output response parsed: {raw_json}")
                 return json.loads(raw_json)
+            else:
+                logger.error(f"Gemini API endpoint returned structural code: {response.status_code} - {response.text}")
+                
     except Exception as e:
-        logger.error(f"Gemini global router failed: {e}")
+        logger.error(f"Gemini global router failed validation logic: {e}")
+        
     return {"intent": "chat", "reply": "Kuch samajh nahi aaya bhai, thoda sa saaf likho na!"}
 
 
@@ -133,7 +146,7 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
                 
                 streak = db_user.current_streak
                 
-                # Fixed: Existing session pass kar rahe hain safely conflict avoid karne ke liye
+                # Reusing structured session scope seamlessly
                 progress_obj = await goal_service.progress_for(session, db_user.telegram_id)
                 progress = _format_goal_progress(progress_obj)
                 leaderboard_service.clear_cache()
