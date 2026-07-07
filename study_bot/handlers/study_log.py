@@ -1,10 +1,9 @@
-"""Handlers: /log, /editlog, /undo, /goal, /progress with Advanced Gemini AI Parsing."""
+"""Handlers: Zero-Command Global Gemini AI Router for Logging, Goals, and Progress."""
 from __future__ import annotations
 
 import logging
-import os
 import json
-from datetime import datetime
+import os
 import httpx
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,52 +14,43 @@ from config import settings
 from database import session_scope
 from services import gamification_service, goal_service, leaderboard_service, reminder_service, study_service, user_service
 from services.study_service import StudyServiceError
-from utils.formatting import bold, escape_html, human_hours, progress_bar
+from utils.formatting import escape_html, human_hours, progress_bar
 from utils.helpers import rate_limited
-from utils.validation import (
-    ParsedLog,
-    ValidationError,
-    parse_hours_token,
-    sanitise_note,
-    sanitise_subject,
-    validate_goal_hours,
-    validate_hours,
-)
 from handlers.core import reply_html
 
 logger = logging.getLogger(__name__)
 
-# Gemini API Endpoint Configuration
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
-
-async def _parse_with_gemini(text: str) -> list[dict]:
-    """Use Gemini AI to extract structured subjects, hours, and notes from raw paragraph."""
-    if not settings.bot_token:  # Just a safety check, we need settings data
-        return []
-        
-    # We assume GEMINI_API_KEY is placed in settings or environment variable
-    # If not in settings, you can add GEMINI_API_KEY="your_key" in your .env file
+async def _analyze_intent_with_gemini(text: str) -> dict:
+    """Analyze the user text to find their real intent and structured data."""
     api_key = getattr(settings, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.warning("GEMINI_API_KEY missing! Falling back to standard processing.")
-        return []
+        logger.warning("GEMINI_API_KEY missing!")
+        return {"intent": "chat", "reply": "Bhai backend pe AI key set nahi hai!"}
 
     prompt = f"""
-    You are a smart AI assistant for a student study bot.
-    Analyze this raw input: "{text}"
-    
-    Extract or intelligently estimate the study sessions. 
-    If the user mentions lecture numbers without hours (e.g., "math lec 5,6,7"), do NOT log the lecture number as hours; instead, smart-estimate the duration based on normal lecture lengths (approx 1.5 hours per lecture).
+    You are the brain of a student group tracking bot named "padhle bsdk".
+    Analyze this message from a student: "{text}"
 
-    Return a strictly valid JSON array of objects. No markdown formatting, no wrapper.
-    Format:
-    [
-      {{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}},
-      {{"subject": "Chem", "hours": 3.0, "note": "Lectures 4,5"}}
-    ]
-    If nothing is trackable, return [].
-    """
+    Determine their intent and return a strictly valid JSON object.
+    
+    Intents possible:
+    1. "log": User is sharing what they studied.
+       Extract an array of sessions. Estimate duration dynamically if only lecture numbers are given (assume ~1.5h per lecture).
+       Example output format:
+       {{"intent": "log", "data": [{{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}}]}}
+
+    2. "set_goal": User wants to set a target/goal for today.
+       Example: "aaj ka target 6 hours" -> {{"intent": "set_goal", "hours": 6.0}}
+
+    3. "check_progress": User wants to see their progress bar or status for today.
+       Example: "mera progress dikhao", "kitna bacha hai aaj ka" -> {{"intent": "check_progress"}}
+
+    4. "chat": Normal chat, rant, or motivation. Do not touch DB. Just provide a short, witty, highly encouraging Hinglish reply keeping the JEE/Class 12 context and group vibe ("padhle bsdk") alive.
+       Example: {{"intent": "chat", "reply": "Padhle bhai, ncert lagane ka time aa gaya hai!"}}
+
+    Return ONLY raw valid JSON block. No markdown, no wrappers.
     """
 
     try:
@@ -73,61 +63,33 @@ async def _parse_with_gemini(text: str) -> list[dict]:
             if response.status_code == 200:
                 data = response.json()
                 raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                # Clean accidental markdown wrapping if any
                 if raw_json.startswith("```"):
                     raw_json = raw_json.split("```")[1].replace("json", "").strip()
                 return json.loads(raw_json)
     except Exception as e:
-        logger.error(f"Gemini processing failed: {e}")
-    return []
-
-
-def _log_confirmation(parsed_subject: str, hours: float, result, new_badges) -> str:
-    lines = [
-        f"✅ Logged <b>{human_hours(hours)}</b> of "
-        f"<b>{escape_html(parsed_subject)}</b>",
-        f"⚡ +{result.xp_earned} XP" + (
-            f"  🎉 Level up! You reached <b>Level {result.new_level}</b>!"
-            if result.leveled_up
-            else ""
-        ),
-    ]
-    if result.goal_completed:
-        lines.append("🎯 Daily goal completed - great job!")
-    if new_badges:
-        badges = " ".join(f"{b.emoji} <b>{escape_html(b.name)}</b>" for b in new_badges)
-        lines.append(f"🎖️ New achievement: {badges}")
-    return "\n".join(lines)
+        logger.error(f"Gemini global router failed: {e}")
+    return {"intent": "chat", "reply": "Kuch samajh nahi aaya bhai, thoda sa saaf likho na!"}
 
 
 @rate_limited()
-async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log a study session: Advanced AI processes paragraphs into individual subject records."""
-    user_raw_text = " ".join(context.args)
-    if not user_raw_text:
-        await reply_html(update, "❌ Usage: Kuch toh likho bhai! \nFormat: <code>/log Math 2 hours, chem lec 4</code>")
+async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Intercerts every group message, evaluates intent via Gemini, and updates engine seamlessly."""
+    user_text = update.message.text.strip() if update.message else None
+    if not user_text:
         return
 
     user = update.effective_user
     await update.message.reply_chat_action("typing")
 
-    # Call Gemini AI for extraction
-    ai_logs = await _parse_with_gemini(user_raw_text)
+    # Get dynamic intent from Gemini
+    ai_analysis = await _analyze_intent_with_gemini(user_text)
+    intent = ai_analysis.get("intent", "chat")
 
-    # Fallback Option: If AI parsing fails, try primitive manual extraction to keep bot active
-    if not ai_logs:
-        import re
-        pattern = r'([a-zA-Z\s_]+)\s+(\d+(?:\.\d+)?)(?:\s*(?:hours|hour|hrs|hr))?'
-        matches = re.findall(pattern, user_raw_text, re.IGNORECASE)
-        for m in matches:
-            ai_logs.append({"subject": m[0].strip(), "hours": float(m[1]), "note": user_raw_text})
-
-    if not ai_logs:
-        await reply_html(update, "❌ AI is unable to parse any valid subject and study hours from your context. Try again clearly.")
+    # --- INTENT: NORMAL CHAT/MOTIVATION ---
+    if intent == "chat":
+        reply_msg = ai_analysis.get("reply", "Padhai pe dhyan do bhai! 🎯")
+        await reply_html(update, reply_msg)
         return
-
-    logged_any = False
-    master_confirmation_lines = []
 
     try:
         async with session_scope() as session:
@@ -135,179 +97,82 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 session, user.id, user.username, user.full_name
             )
 
-            for session_entry in ai_logs:
-                sub_name = session_entry.get("subject", "General").strip()
-                hours_val = float(session_entry.get("hours", 0))
-                note_val = session_entry.get("note", user_raw_text)
+            # --- INTENT: LOG STUDY SESSIONS ---
+            if intent == "log":
+                sessions_data = ai_analysis.get("data", [])
+                if not sessions_data:
+                    await reply_html(update, "🧠 AI ko koi specific studies nahi mili. Thoda clear batao!")
+                    return
 
-                if hours_val <= 0 or len(sub_name) <= 1:
-                    continue
+                master_confirmation_lines = []
+                logged_any = False
 
-                subject = sanitise_subject(sub_name)
-                note = sanitise_note(note_val)
+                for entry in sessions_data:
+                    sub_name = entry.get("subject", "General").strip()
+                    hours_val = float(entry.get("hours", 0))
+                    note_val = entry.get("note", user_text)
 
-                # Direct database writing using core business rules
-                result = await study_service.log_study(
-                    session, db_user, subject, hours_val, note
-                )
-                logged_any = True
+                    if hours_val <= 0 or len(sub_name) <= 1:
+                        continue
+
+                    # Core DB operations
+                    result = await study_service.log_study(
+                        session, db_user, sub_name, hours_val, note_val
+                    )
+                    logged_any = True
+                    master_confirmation_lines.append(
+                        f"✨ Logged <b>{human_hours(hours_val)}</b> in <b>{escape_html(sub_name)}</b> (+{result.xp_earned} XP)"
+                    )
+
+                if not logged_any:
+                    await reply_html(update, "❌ Kuch valid data log nahi ho paaya.")
+                    return
+
+                new_badges = await gamification_service.evaluate_user(session, db_user)
+                await reminder_service.mark_logged(session, db_user.telegram_id)
                 
-                # Stack up individual confirmations
-                master_confirmation_lines.append(
-                    f"✨ Logged <b>{human_hours(hours_val)}</b> in <b>{escape_html(subject)}</b> (+{result.xp_earned} XP)"
-                )
+                streak = db_user.current_streak
+                progress = _format_goal_progress(await _goal_progress(db_user.telegram_id))
+                leaderboard_service.clear_cache()
 
-            if not logged_any:
-                await reply_html(update, "❌ Configuration matching yielded 0 hours tracked.")
-                return
+                summary_txt = "🧠 <b>Gemini AI Auto-Tracker</b>\n" + "\n".join(master_confirmation_lines)
+                if new_badges:
+                    badges = " ".join(f"{b.emoji} <b>{escape_html(b.name)}</b>" for b in new_badges)
+                    summary_txt += f"\n🎖️ Achievements: {badges}"
+                
+                await reply_html(update, f"{summary_txt}\n\n🔥 Streak: {streak} days\n{progress}")
 
-            new_badges = await gamification_service.evaluate_user(session, db_user)
-            await reminder_service.mark_logged(session, db_user.telegram_id)
-            
-            streak = db_user.current_streak
-            progress = _format_goal_progress(await _goal_progress(db_user.telegram_id))
+            # --- INTENT: SET DAILY GOAL ---
+            elif intent == "set_goal":
+                hours_val = float(ai_analysis.get("hours", 0))
+                if hours_val <= 0 or hours_val > 24:
+                    await reply_html(update, "❌ Sahi ghante batao bhai (1 se 24 ke beech)!")
+                    return
+                
+                await goal_service.set_goal(session, user.id, hours_val)
+                progress = _format_goal_progress(await _goal_progress(user.id))
+                await reply_html(update, f"🎯 Daily goal set to <b>{human_hours(hours_val)}</b>!\n{progress}")
 
-        leaderboard_service.clear_cache()
-        
-        # Display super aesthetic dashboard response
-        summary_txt = "🧠 <b>Gemini AI Study Tracker</b>\n" + "\n".join(master_confirmation_lines)
-        if new_badges:
-            badges = " ".join(f"{b.emoji} <b>{escape_html(b.name)}</b>" for b in new_badges)
-            summary_txt += f"\n🎖️ Achievements: {badges}"
-            
-        await reply_html(update, f"{summary_txt}\n\n🔥 Streak: {streak} days\n{progress}")
+            # --- INTENT: CHECK PROGRESS ---
+            elif intent == "check_progress":
+                progress = await _goal_progress(user.id)
+                text_bar = _format_goal_progress(progress)
+                status = "✅ Goal reached!" if progress.completed and progress.goal_hours > 0 else ""
+                await reply_html(update, f"📊 Today's progress\n{text_bar}\n{status}")
 
-    except StudyServiceError as exc:
-        await reply_html(update, f"❌ {exc}")
-    except SQLAlchemyError:
-        logger.exception("Database error while logging study for %s", user.id)
-        await reply_html(update, "❌ Database operations failed.")
     except Exception:
-        logger.exception("Unexpected error in AI /log")
-        raise
+        logger.exception("Error inside global AI engine execution")
+        await reply_html(update, "⚠️ Kuch gadbad ho gayi background mein, thodi der baad try karo.")
 
 
 async def _goal_progress(telegram_id: int):
-    """Return the :class:`GoalProgress` for a user (own session)."""
     from database import AsyncSessionLocal
     async with AsyncSessionLocal() as session:
         return await goal_service.progress_for(session, telegram_id)
 
 
 def _format_goal_progress(progress) -> str:
-    """Render a :class:`GoalProgress` as an HTML progress block."""
     if progress.goal_hours <= 0:
-        return "Set a target with /goal &lt;hours&gt;"
+        return "Target set nahi hai bhai."
     bar = progress_bar(progress.logged_hours, progress.goal_hours)
-    return (
-        f"<code>{bar}</code>\n{human_hours(progress.logged_hours)}/"
-        f"{human_hours(progress.goal_hours)}"
-    )
-
-
-@rate_limited()
-async def cmd_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Set today's goal: /goal 5."""
-    if not context.args:
-        await reply_html(update, "Usage: /goal &lt;hours&gt;  (e.g. /goal 5)")
-        return
-    try:
-        hours = parse_hours_token(context.args[0], field="goal")
-        validate_goal_hours(hours)
-    except ValidationError as exc:
-        await reply_html(update, f"❌ {exc}")
-        return
-
-    user = update.effective_user
-    try:
-        async with session_scope() as session:
-            await user_service.get_or_create_user(
-                session, user.id, user.username, user.full_name
-            )
-            await goal_service.set_goal(session, user.id, hours)
-        progress = _format_goal_progress(await _goal_progress(user.id))
-        await reply_html(update, f"🎯 Daily goal set to <b>{human_hours(hours)}</b>!\n{progress}")
-    except Exception:
-        logger.exception("Error in /goal")
-        raise
-
-
-@rate_limited()
-async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show today's goal progress bar."""
-    user = update.effective_user
-    progress = await _goal_progress(user.id)
-    text = _format_goal_progress(progress)
-    status = "✅ Goal reached!" if progress.completed and progress.goal_hours > 0 else ""
-    await reply_html(update, f"📊 Today's progress\n{text}\n{status}")
-
-
-@rate_limited()
-async def cmd_editlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit the most recent log."""
-    if not context.args:
-        await reply_html(
-            update,
-            "Usage:\n/editlog &lt;hours&gt;\n/editlog subject &lt;name&gt;\n/editlog note &lt;text&gt;",
-        )
-        return
-
-    user = update.effective_user
-    try:
-        async with session_scope() as session:
-            hours = None
-            subject = None
-            note = None
-            mode = context.args[0].lower()
-            if mode == "subject":
-                subject = sanitise_subject(" ".join(context.args[1:]))
-            elif mode == "note":
-                note = sanitise_note(" ".join(context.args[1:]))
-            else:
-                hours = parse_hours_token(context.args[0], field="hours")
-                validate_hours(hours)
-
-            result = await study_service.edit_last(
-                session, user.id, hours=hours, subject=subject, note=note
-            )
-            if result is None:
-                await reply_html(update, "You have no study logs to edit.")
-                return
-            log, _ = result
-            leaderboard_service.clear_cache()
-        await reply_html(
-            update,
-            f"✏️ Updated last log: <b>{human_hours(log.hours)}</b> of "
-            f"<b>{escape_html(log.subject)}</b>",
-        )
-    except StudyServiceError as exc:
-        await reply_html(update, f"❌ {exc}")
-    except ValidationError as exc:
-        await reply_html(update, f"❌ {exc}")
-    except Exception:
-        logger.exception("Error in /editlog")
-        raise
-
-
-@rate_limited()
-async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Undo the most recent log within the edit window."""
-    user = update.effective_user
-    try:
-        async with session_scope() as session:
-            result = await study_service.undo_last(session, user.id)
-            if result is None:
-                await reply_html(update, "You have no study logs to undo.")
-                return
-            log, _ = result
-            leaderboard_service.clear_cache()
-        await reply_html(
-            update,
-            f"↩️ Undid your last log ({human_hours(log.hours)} of "
-            f"{escape_html(log.subject)}).",
-        )
-    except StudyServiceError as exc:
-        await reply_html(update, f"❌ {exc}")
-    except Exception:
-        logger.exception("Error in /undo")
-        raise
+    return f"<code>{bar}</code>\n{human_hours(progress.logged_hours)}/{human_hours(progress.goal_hours)}"
