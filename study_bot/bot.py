@@ -138,6 +138,27 @@ def create_application() -> Application:
     return app
 
 
+async def run_bot_async(app: Application) -> None:
+    """Python 3.14+ safe async entry point to handle bot lifecycle."""
+    await app.initialize()
+    await app.start()
+    
+    # stop_signals=None Render env me process termination issues ko rokta hai
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, stop_signals=None)
+    logger.info("Bot successfully started and polling for updates...")
+    
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Termination signal received.")
+    finally:
+        logger.info("Stopping bot gracefully...")
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+
+
 def main() -> None:
     """Entry point: configure logging and start long polling."""
     setup_logging(settings.log_level)
@@ -147,8 +168,20 @@ def main() -> None:
             "BOT_TOKEN is not set. Copy .env.example to .env and configure it."
         )
         return
+    
     app = create_application()
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # Explicitly check or create active event loop for Python 3.14+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    try:
+        loop.run_until_complete(run_bot_async(app))
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped.")
 
 
 if __name__ == "__main__":
