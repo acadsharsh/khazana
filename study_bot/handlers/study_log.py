@@ -73,7 +73,7 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
 
 @rate_limited()
 async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Intercerts every group message, evaluates intent via Gemini, and updates engine seamlessly."""
+    """Intercepts every group message, evaluates intent via Gemini, and updates engine seamlessly."""
     user_text = update.message.text.strip() if update.message else None
     if not user_text:
         return
@@ -132,7 +132,10 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
                 await reminder_service.mark_logged(session, db_user.telegram_id)
                 
                 streak = db_user.current_streak
-                progress = _format_goal_progress(await _goal_progress(db_user.telegram_id))
+                
+                # Fixed: Existing session pass kar rahe hain safely conflict avoid karne ke liye
+                progress_obj = await goal_service.progress_for(session, db_user.telegram_id)
+                progress = _format_goal_progress(progress_obj)
                 leaderboard_service.clear_cache()
 
                 summary_txt = "🧠 <b>Gemini AI Auto-Tracker</b>\n" + "\n".join(master_confirmation_lines)
@@ -150,14 +153,15 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
                     return
                 
                 await goal_service.set_goal(session, user.id, hours_val)
-                progress = _format_goal_progress(await _goal_progress(user.id))
+                progress_obj = await goal_service.progress_for(session, user.id)
+                progress = _format_goal_progress(progress_obj)
                 await reply_html(update, f"🎯 Daily goal set to <b>{human_hours(hours_val)}</b>!\n{progress}")
 
             # --- INTENT: CHECK PROGRESS ---
             elif intent == "check_progress":
-                progress = await _goal_progress(user.id)
-                text_bar = _format_goal_progress(progress)
-                status = "✅ Goal reached!" if progress.completed and progress.goal_hours > 0 else ""
+                progress_obj = await goal_service.progress_for(session, user.id)
+                text_bar = _format_goal_progress(progress_obj)
+                status = "✅ Goal reached!" if progress_obj.completed and progress_obj.goal_hours > 0 else ""
                 await reply_html(update, f"📊 Today's progress\n{text_bar}\n{status}")
 
     except Exception:
@@ -165,14 +169,9 @@ async def handle_global_ai_message(update: Update, context: ContextTypes.DEFAULT
         await reply_html(update, "⚠️ Kuch gadbad ho gayi background mein, thodi der baad try karo.")
 
 
-async def _goal_progress(telegram_id: int):
-    from database import AsyncSessionLocal
-    async with AsyncSessionLocal() as session:
-        return await goal_service.progress_for(session, telegram_id)
-
-
 def _format_goal_progress(progress) -> str:
-    if progress.goal_hours <= 0:
+    """Formats the progress bar object safely."""
+    if not progress or progress.goal_hours <= 0:
         return "Target set nahi hai bhai."
     bar = progress_bar(progress.logged_hours, progress.goal_hours)
     return f"<code>{bar}</code>\n{human_hours(progress.logged_hours)}/{human_hours(progress.goal_hours)}"
