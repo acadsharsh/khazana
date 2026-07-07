@@ -24,10 +24,17 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini
 
 async def _analyze_intent_with_gemini(text: str) -> dict:
     """Analyze the user text to find their real intent and structured data with robust error recovery."""
-    api_key = getattr(settings, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY")
+    # Direct fetch without dynamic getattr risk
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.warning("GEMINI_API_KEY missing!")
-        return {"intent": "chat", "reply": "Bhai backend pe AI key set nahi hai!"}
+        try:
+            api_key = settings.gemini_api_key
+        except Exception:
+            pass
+
+    if not api_key:
+        logger.warning("GEMINI_API_KEY completely missing from environment variables!")
+        return {"intent": "chat", "reply": "Bhai backend pe GEMINI_API_KEY config missing hai!"}
 
     prompt = f"""
     You are the brain of a student group tracking bot named "padhle bsdk".
@@ -36,10 +43,10 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
     Determine their intent and return a strictly valid JSON object. Do not include markdown code block syntax.
     
     Intents possible:
-    1. "log": User is sharing what they studied (e.g., "math lec 5,6,7 aur chem lec 4,5").
+    1. "log": User is sharing what they studied.
        Extract an array of sessions. Estimate duration dynamically if only lecture numbers are given (assume ~1.5h per lecture).
        Example output format:
-       {{"intent": "log", "data": [{{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}}, {{"subject": "Chemistry", "hours": 3.0, "note": "Lectures 4,5"}}]}}
+       {{"intent": "log", "data": [{{"subject": "Math", "hours": 4.5, "note": "Lectures 5,6,7"}}]}}
 
     2. "set_goal": User wants to set a target/goal for today.
        Example: "aaj ka target 6 hours" -> {{"intent": "set_goal", "hours": 6.0}}
@@ -54,34 +61,35 @@ async def _analyze_intent_with_gemini(text: str) -> dict:
     """
 
     try:
+        # Enforce application/json format string globally
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"}
+        }
+        
         async with httpx.AsyncClient() as client:
-            # generationConfig enforces structural validation from the AI studio directly
             response = await client.post(
                 f"{GEMINI_API_URL}?key={api_key}",
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"responseMimeType": "application/json"}
-                },
-                timeout=12.0
+                json=payload,
+                timeout=15.0
             )
             
             if response.status_code == 200:
                 data = response.json()
                 raw_json = data['candidates'][0]['content']['parts'][0]['text'].strip()
                 
-                # Dynamic stripping to clear any stray wrapper artifacts
                 if "```" in raw_json:
                     raw_json = raw_json.replace("```json", "").replace("```", "").strip()
                 
                 logger.info(f"Gemini raw clean output response parsed: {raw_json}")
                 return json.loads(raw_json)
             else:
-                logger.error(f"Gemini API endpoint returned structural code: {response.status_code} - {response.text}")
+                logger.error(f"Gemini API returned code: {response.status_code} - {response.text}")
+                return {"intent": "chat", "reply": f"Gemini API Error: Status {response.status_code}"}
                 
     except Exception as e:
-        logger.error(f"Gemini global router failed validation logic: {e}")
-        
-    return {"intent": "chat", "reply": "Kuch samajh nahi aaya bhai, thoda sa saaf likho na!"}
+        logger.error(f"Gemini direct endpoint compilation failed: {e}")
+        return {"intent": "chat", "reply": f"⚠️ Parser Crash: {str(e)}"}
 
 
 @rate_limited()
